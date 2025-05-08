@@ -18,6 +18,9 @@ import chromadb
 from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
 
+# project-a 참조 유틸리티 임포트
+from reference_utils import process_documents, split_text_into_chunks
+
 # 앱 설정
 APP_DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 CHROMA_DB_DIR = os.path.join(APP_DATA_DIR, "chroma_db")
@@ -193,17 +196,33 @@ async def crawl_website(request: CrawlRequest):
         # 크롤링된 문서 처리 및 ChromaDB에 추가
         print(f"{len(documents)} 문서를 처리 중...")
         
+        # 문서 형식 변환 (project-a 참조 유틸리티 사용)
+        processed_doc_list = []
+        for idx, doc_data in documents.items():
+            doc_id = f"{request.site_name}_{idx}"
+            processed_doc_list.append({
+                'id': doc_id,
+                'text': doc_data['full_text'],
+                'metadata': {
+                    'title': doc_data['title'],
+                    'url': doc_data['url'],
+                    'site': request.site_name,
+                    'created_at': datetime.now().isoformat()
+                }
+            })
+        
+        # project-a 참조 유틸리티로 문서 처리 (긴 문서 청크 분할)
+        processed_docs = process_documents(processed_doc_list)
+        
         texts = []
         ids = []
         metadatas = []
         
-        for idx, doc_data in documents.items():
-            doc_id = f"{request.site_name}_{idx}"
-            
+        for doc in processed_docs:
             # 이미 존재하는 문서인지 확인 (사이트 이름과 URL 기준)
             try:
                 existing = collection.get(
-                    where={"site": request.site_name, "url": doc_data['url']}
+                    where={"site": request.site_name, "url": doc['metadata'].get('url', '')}
                 )
                 if existing and len(existing["ids"]) > 0:
                     # 이미 존재하는 문서 삭제
@@ -211,17 +230,9 @@ async def crawl_website(request: CrawlRequest):
             except Exception as e:
                 print(f"문서 검사 중 오류: {str(e)}")
             
-            texts.append(doc_data['full_text'])
-            ids.append(doc_id)
-            
-            # 메타데이터 생성
-            metadata = {
-                "title": doc_data['title'],
-                "url": doc_data['url'],
-                "site": request.site_name,
-                "created_at": datetime.now().isoformat()
-            }
-            metadatas.append(metadata)
+            texts.append(doc['text'])
+            ids.append(doc['id'])
+            metadatas.append(doc['metadata'])
         
         # 임베딩 생성 및 ChromaDB에 추가
         if texts:
