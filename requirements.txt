@@ -1,0 +1,10 @@
+# requirements.txt - VS Code Docs 서버를 위한 의존성 패키지
+fastapi==0.110.0
+uvicorn==0.27.0
+pydantic==2.5.3
+sentence-transformers==2.4.0
+chromadb==0.4.22
+beautifulsoup4==4.12.2
+requests==2.31.0
+numpy==1.26.3
+tqdm==4.66.1
