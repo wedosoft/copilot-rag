@@ -2,7 +2,7 @@
 version: '3'
 
 services:
-  vscode-docs:
+  copilot-rag-server:  # 서비스 이름을 명확하게 변경
     build:
       context: .
       dockerfile: Dockerfile
@@ -10,6 +10,14 @@ services:
       - "8765:8765"  # MCP 서버 포트
     volumes:
       - ./data:/app/data  # 데이터 영속성
+      - ./logs:/app/logs  # 로그 파일용 볼륨 추가
     environment:
       - SENTENCE_TRANSFORMERS_HOME=/app/data/models
+      - PYTHONUNBUFFERED=1  # 로그 출력 버퍼링 방지
     restart: unless-stopped
+    healthcheck:  # 헬스체크 추가
+      test: ["CMD", "curl", "-f", "http://localhost:8765/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s  # 서버 초기화에 시간이 걸릴 수 있으므로 충분한 시간 부여
