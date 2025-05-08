@@ -1,0 +1,14 @@
+{
+  "total_pages": 351,
+  "chunk_size": 1000,
+  "chunk_count": 1,
+  "chunks": {
+    "chunk_0": {
+      "file": "/app/data/temp_crawl/kadence-support/chunks/chunk_0.json",
+      "count": 351,
+      "start_id": "0",
+      "end_id": "350"
+    }
+  },
+  "crawl_date": "2025-05-08 14:43:04"
+}

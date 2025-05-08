@@ -11,6 +11,7 @@ services:
     volumes:
       - ./data:/app/data  # 데이터 영속성
       - ./logs:/app/logs  # 로그 파일용 볼륨 추가
+      - .:/app  # 소스 코드 마운트 추가 - 코드 변경 시 자동 적용
     environment:
       - SENTENCE_TRANSFORMERS_HOME=/app/data/models
       - PYTHONUNBUFFERED=1  # 로그 출력 버퍼링 방지

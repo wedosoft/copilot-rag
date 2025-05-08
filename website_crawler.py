@@ -239,7 +239,7 @@ class WebsiteCrawler:
         
         # 시작 경로가 있는 경우, 엄격하게 해당 경로로 시작하는 URL만 허용
         if not parsed.path.startswith(start_path):
-            logger.info(f"지정된 경로({start_path}) 외부의 URL 제외: {url}")
+            logger.debug(f"지정된 경로({start_path}) 외부의 URL 제외: {url}")  # INFO에서 DEBUG로 변경
             return False
         
         # 시작 URL의 첫 번째 경로 세그먼트와 현재 URL의 첫 번째 세그먼트가 같은지 확인
@@ -251,7 +251,7 @@ class WebsiteCrawler:
             
         # 시작 경로의 첫 번째 경로가 현재 URL의 첫 번째 경로와 같아야 함
         if not current_segments or start_segments[0] != current_segments[0]:
-            logger.info(f"다른 경로 세그먼트의 URL 제외: {url}, 시작: {start_segments[0] if start_segments else '/'}, 현재: {current_segments[0] if current_segments else '/'}")
+            logger.debug(f"다른 경로 세그먼트의 URL 제외: {url}, 시작: {start_segments[0] if start_segments else '/'}, 현재: {current_segments[0] if current_segments else '/'}")  # INFO에서 DEBUG로 변경
             return False
             
         # robots.txt 규칙 확인
