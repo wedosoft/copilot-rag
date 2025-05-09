@@ -132,3 +132,12 @@ def process_documents(docs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 processed_docs.append(chunk_doc)
     
     return processed_docs
+
+def save_to_chromadb(content_data, site_name=None):
+    """
+    content_data(dict)를 ChromaDB에 저장하는 더미 함수(실제 구현 필요).
+    Docker 환경에서 ImportError 방지용 기본 함수입니다.
+    """
+    logger.info(f"[더미] ChromaDB에 {len(content_data)}개 문서를 저장합니다. (site_name={site_name})")
+    # 실제 저장 로직은 mcp_server.py에서 처리됨
+    return True

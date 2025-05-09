@@ -1,0 +1,74 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# VSCode
+.vscode/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Data & Models
+/data/
+!/data/chroma_db/
+!/data/models/
+/data/chroma_db/*
+/data/models/*
+!/data/chroma_db/.gitkeep
+!/data/models/.gitkeep
+
+# Crawl outputs
+/data/temp_crawl/
+
+# Env
+.venv/
+venv/
+ENV/
+.env
+**/.env
+**/venv/
+**/.venv/
+**/ENV/
+
+# Docker
+*.pid
+
+# Misc
+*.bak
+*.swp
+*.tmp
+
+# Ignore crawl artifacts
+crawler.log
+
+# Ignore model cache
+sentence-transformers/
+
+# Ignore backup/old files
+*_backup_*/
+
+# Ignore test artifacts
+test_*/
+
+# Ignore compiled files
+*.pkl
+*.pickle
+*.db
+*.sqlite3
+
+# Ignore markdown guides (if not needed)
+website_crawler_guide.md
+
+# Allow README
+!README.md

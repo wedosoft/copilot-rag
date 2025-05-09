@@ -11,10 +11,9 @@ import shutil
 import sys
 import re
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Dict, Any, Optional
 import pickle
 import logging
-import xml.etree.ElementTree as ET
+from reference_utils import save_to_chromadb
 
 # 로깅 설정
 logging.basicConfig(
@@ -43,22 +42,19 @@ DOCS_BASE_DIR = get_storage_dir()
 CONFIG_FILE = os.path.join(DOCS_BASE_DIR, "config.ini")
 
 class WebsiteCrawler:
-    def __init__(self, start_url, output_dir="crawled_content", site_name=None, max_pages=5000, resume=False, use_sitemap=False):
-        self.start_url = start_url
-        self.base_domain = urlparse(start_url).netloc
-        self.visited_urls = set()
-        self.content_data = {}
+    def __init__(self, start_url, output_dir="crawled_content", site_name=None, max_pages=5000, resume=False):
+        self.start_url = start_url.rstrip('/') + '/'
         self.output_dir = output_dir
-        self.site_name = site_name or self.base_domain
+        self.site_name = site_name or "default"
         self.max_pages = max_pages
         self.resume = resume
+        self.visited_urls = set()
+        self.content_data = {}
         self.rate_limit_delay = 0.5  # 서버 부하 방지를 위한 기본 딜레이 (초)
         self.retry_count = 3  # 요청 실패 시 재시도 횟수
         self.url_exclusion_patterns = []  # 제외할 URL 패턴 (정규식)
         self.failed_urls = {}  # 실패한 URL 추적
         self.robots_rules = {}  # robots.txt 규칙 저장
-        self.sitemap_urls = []  # 사이트맵에서 추출한 URL 저장
-        self.use_sitemap = use_sitemap  # 사이트맵 사용 여부
         
         # 출력 디렉토리 생성
         if not os.path.exists(output_dir):
@@ -118,7 +114,7 @@ class WebsiteCrawler:
                         agent = line.split(':', 1)[1].strip()
                         current_agent = agent
                         if current_agent not in self.robots_rules:
-                            self.robots_rules[current_agent] = {'disallow': [], 'allow': [], 'crawl-delay': None, 'sitemaps': []}
+                            self.robots_rules[current_agent] = {'disallow': [], 'allow': [], 'crawl-delay': None}
                     
                     elif line.lower().startswith('disallow:') and current_agent:
                         path = line.split(':', 1)[1].strip()
@@ -136,11 +132,6 @@ class WebsiteCrawler:
                             self.robots_rules[current_agent]['crawl-delay'] = float(delay)
                         except ValueError:
                             pass
-                    
-                    elif line.lower().startswith('sitemap:'):
-                        sitemap_url = line.split(':', 1)[1].strip()
-                        if sitemap_url:
-                            self.robots_rules.setdefault('*', {}).setdefault('sitemaps', []).append(sitemap_url)
                 
                 # 글로벌 또는 '*' 규칙에서 crawl-delay 적용
                 for agent in ('*', 'bot', 'crawler'):
@@ -191,8 +182,7 @@ class WebsiteCrawler:
         try:
             with open(self.state_file, 'wb') as f:
                 pickle.dump({
-                    'visited_urls': self.visited_urls,
-                    'sitemap_urls': self.sitemap_urls
+                    'visited_urls': self.visited_urls
                 }, f)
                 
             # 실패한 URL도 저장
@@ -211,60 +201,25 @@ class WebsiteCrawler:
                 with open(self.state_file, 'rb') as f:
                     state = pickle.load(f)
                     self.visited_urls = state.get('visited_urls', set())
-                    self.sitemap_urls = state.get('sitemap_urls', [])
                 return True
             except Exception as e:
                 logger.error(f"크롤링 상태 불러오기 중 오류 발생: {e}")
         return False
 
     def is_valid_url(self, url):
-        """URL이 유효한지, 지정된 경로에 속하는지 확인"""
-        parsed = urlparse(url)
-        
-        # 기본 유효성 검사 - 같은 도메인인지 확인
-        if not (bool(parsed.netloc) and parsed.netloc == self.base_domain):
+        """start_url과 동일한 도메인/스킴/포트의 자기 자신 및 하위 경로만 True 반환 (슬래시 유무 무시)"""
+        start = urlparse(self.start_url)
+        target = urlparse(url)
+        if (start.scheme, start.hostname, start.port or 80) != (target.scheme, target.hostname, target.port or 80):
             return False
-            
-        # 시작 URL의 경로를 가져와서 해당 경로로 시작하는 URL만 크롤링
-        start_path = urlparse(self.start_url).path
-        
-        # 시작 경로가 없거나 루트('/')인 경우, 모든 페이지 허용
-        if not start_path or start_path == '/':
-            # 그래도 일부 일반적인 경로는 제외
-            excluded_paths = ['/wp-admin/', '/wp-login.php', '/cart/', '/checkout/']
-            for excluded in excluded_paths:
-                if parsed.path.startswith(excluded):
-                    return False
-            return True
-        
-        # 시작 경로가 있는 경우, 엄격하게 해당 경로로 시작하는 URL만 허용
-        if not parsed.path.startswith(start_path):
-            logger.debug(f"지정된 경로({start_path}) 외부의 URL 제외: {url}")  # INFO에서 DEBUG로 변경
-            return False
-        
-        # 시작 URL의 첫 번째 경로 세그먼트와 현재 URL의 첫 번째 세그먼트가 같은지 확인
-        start_segments = [seg for seg in start_path.split('/') if seg]
-        current_segments = [seg for seg in parsed.path.split('/') if seg]
-        
-        if not start_segments:
-            return True
-            
-        # 시작 경로의 첫 번째 경로가 현재 URL의 첫 번째 경로와 같아야 함
-        if not current_segments or start_segments[0] != current_segments[0]:
-            logger.debug(f"다른 경로 세그먼트의 URL 제외: {url}, 시작: {start_segments[0] if start_segments else '/'}, 현재: {current_segments[0] if current_segments else '/'}")  # INFO에서 DEBUG로 변경
-            return False
-            
-        # robots.txt 규칙 확인
-        if not self.is_allowed_by_robots(url):
-            return False
-            
-        # 일반적으로 크롤링이 불필요한 파일 형식 제외
-        excluded_extensions = ['.pdf', '.jpg', '.jpeg', '.png', '.gif', '.svg', '.css', '.js', '.ico', 
-                              '.zip', '.rar', '.tar', '.gz', '.mp4', '.mp3', '.wav', '.avi', '.mov']
-        if any(url.lower().endswith(ext) for ext in excluded_extensions):
-            return False
-            
-        return True
+        # path 비교 시 끝 슬래시 무시
+        start_path = start.path.rstrip('/')
+        target_path = target.path.rstrip('/')
+        # 루트라면 모두 허용
+        if start_path == '':
+            return target_path.startswith('/')
+        # 자기 자신 또는 하위 경로 모두 허용
+        return target_path == start_path or target_path.startswith(start_path + '/')
     
     def get_page_content(self, url):
         """페이지 내용 가져오기 (재시도 로직 추가)"""
@@ -403,204 +358,51 @@ class WebsiteCrawler:
         }
     
     def chunked_save(self, chunk_size=1000):
-        """크롤링 데이터를 청크로 나누어 저장 (대량 데이터 처리용)"""
+        """크롤링 데이터를 청크로 나누어 저장 (대량 데이터 처리용, 디버깅 로그 추가)"""
         if not self.content_data:
             logger.warning("저장할 데이터가 없습니다.")
             return
-            
-        chunks_dir = os.path.join(self.output_dir, 'chunks')
-        os.makedirs(chunks_dir, exist_ok=True)
-        
-        # 청크로 나누어 저장
-        chunks = {}
-        chunk_num = 0
-        items = list(self.content_data.items())
-        
-        for i in range(0, len(items), chunk_size):
-            chunk = dict(items[i:i+chunk_size])
-            chunk_file = os.path.join(chunks_dir, f'chunk_{chunk_num}.json')
-            
-            with open(chunk_file, 'w', encoding='utf-8') as f:
-                json.dump(chunk, f, ensure_ascii=False, indent=2)
-                
-            chunks[f'chunk_{chunk_num}'] = {
-                'file': chunk_file,
-                'count': len(chunk),
-                'start_id': list(chunk.keys())[0],
-                'end_id': list(chunk.keys())[-1]
-            }
-            
-            chunk_num += 1
-        
-        # 청크 정보를 인덱스 파일에 저장
-        index_file = os.path.join(chunks_dir, 'index.json')
-        with open(index_file, 'w', encoding='utf-8') as f:
-            json.dump({
-                'total_pages': len(self.content_data),
-                'chunk_size': chunk_size,
-                'chunk_count': chunk_num,
-                'chunks': chunks,
-                'crawl_date': time.strftime('%Y-%m-%d %H:%M:%S')
-            }, f, ensure_ascii=False, indent=2)
-            
-        logger.info(f"데이터를 {chunk_num}개 청크로 나누어 저장했습니다. 총 {len(self.content_data)}개 페이지.")
-        
-        # 전체 데이터도 저장 (기존 방식)
-        with open(os.path.join(self.output_dir, 'crawled_data.json'), 'w', encoding='utf-8') as f:
-            json.dump(self.content_data, f, ensure_ascii=False, indent=2)
-    
-    def parse_sitemap_xml(self, xml_content, sitemap_url=""):
-        """XML 사이트맵 파싱하여 URL 추출"""
-        urls = []
         try:
-            # XML 네임스페이스 처리
-            ns = {
-                'sm': 'http://www.sitemaps.org/schemas/sitemap/0.9',
-                'xhtml': 'http://www.w3.org/1999/xhtml'
-            }
-            
-            root = ET.fromstring(xml_content)
-            
-            # <url> 요소에서 <loc> 찾기
-            for url_element in root.findall('.//sm:url', ns):
-                loc_element = url_element.find('.//sm:loc', ns)
-                if loc_element is not None and loc_element.text:
-                    url = loc_element.text.strip()
-                    if self.is_valid_url(url):
-                        urls.append(url)
-            
-            # <sitemap> 요소에서 <loc> 찾기 (사이트맵 인덱스 파일인 경우)
-            for sitemap_element in root.findall('.//sm:sitemap', ns):
-                loc_element = sitemap_element.find('.//sm:loc', ns)
-                if loc_element is not None and loc_element.text:
-                    sitemap_url = loc_element.text.strip()
-                    
-                    # 시작 URL 경로와 다른 경로의 사이트맵은 건너뛰기
-                    start_path = urlparse(self.start_url).path
-                    sitemap_path = urlparse(sitemap_url).path
-                    
-                    # 시작 경로가 있고, 사이트맵 경로가 시작 경로로 시작하지 않으면 건너뛰기
-                    if start_path and start_path != '/' and not sitemap_path.startswith(start_path):
-                        logger.info(f"다른 경로의 사이트맵 건너뛰기: {sitemap_url}, 시작 경로: {start_path}")
-                        continue
-                    
-                    # 특정 경로 사이트맵 명시적 제외 (예: /support-forums/)
-                    excluded_sitemap_paths = ['/support-forums/', '/wp-admin/', '/cart/']
-                    if any(sitemap_path.startswith(excluded) for excluded in excluded_sitemap_paths):
-                        logger.info(f"제외 경로의 사이트맵 건너뛰기: {sitemap_url}")
-                        continue
-                    
-                    try:
-                        logger.info(f"하위 사이트맵 파싱 중: {sitemap_url}")
-                        sitemap_content = self.get_page_content(sitemap_url)
-                        if sitemap_content:
-                            # 재귀적으로 하위 사이트맵 처리
-                            sub_urls = self.parse_sitemap_xml(sitemap_content, sitemap_url)
-                            urls.extend(sub_urls)
-                    except Exception as e:
-                        logger.warning(f"하위 사이트맵 파싱 중 오류 발생: {sitemap_url}, {e}")
+            chunks_dir = os.path.join(self.output_dir, 'chunks')
+            os.makedirs(chunks_dir, exist_ok=True)
+            chunks = {}
+            chunk_num = 0
+            items = list(self.content_data.items())
+            for i in range(0, len(items), chunk_size):
+                chunk = dict(items[i:i+chunk_size])
+                chunk_file = os.path.join(chunks_dir, f'chunk_{chunk_num}.json')
+                with open(chunk_file, 'w', encoding='utf-8') as f:
+                    json.dump(chunk, f, ensure_ascii=False, indent=2)
+                chunks[f'chunk_{chunk_num}'] = {
+                    'file': chunk_file,
+                    'count': len(chunk),
+                    'start_id': list(chunk.keys())[0],
+                    'end_id': list(chunk.keys())[-1]
+                }
+                chunk_num += 1
+            index_file = os.path.join(chunks_dir, 'index.json')
+            with open(index_file, 'w', encoding='utf-8') as f:
+                json.dump({
+                    'total_pages': len(self.content_data),
+                    'chunk_size': chunk_size,
+                    'chunk_count': chunk_num,
+                    'chunks': chunks,
+                    'crawl_date': time.strftime('%Y-%m-%d %H:%M:%S')
+                }, f, ensure_ascii=False, indent=2)
+            logger.info(f"데이터를 {chunk_num}개 청크로 나누어 저장했습니다. 총 {len(self.content_data)}개 페이지. 청크 디렉토리: {chunks_dir}")
         except Exception as e:
-            logger.warning(f"사이트맵 XML 파싱 중 오류 발생: {e}")
-            # XML 파싱 실패 시 정규 표현식으로 URL 추출 시도
-            try:
-                urls = re.findall(r'<loc>(https?://[^<]+)</loc>', xml_content)
-                # 추출된 URL 중 유효한 URL만 필터링
-                urls = [url for url in urls if self.is_valid_url(url)]
-            except Exception as regex_err:
-                logger.error(f"정규 표현식 대체 파싱도 실패: {regex_err}")
-        
-        return urls
-    
-    def check_sitemaps(self):
-        """웹사이트의 사이트맵이 있는지 확인하고 URL 추출"""
-        # 이미 사이트맵 URL이 있는 경우 재사용
-        if self.sitemap_urls:
-            logger.info(f"이전에 파싱한 사이트맵 URL {len(self.sitemap_urls)}개 사용")
-            return self.sitemap_urls
-            
-        sitemap_urls = []
-        
-        # robots.txt에서 사이트맵 URL 사용
-        for agent, rules in self.robots_rules.items():
-            if 'sitemaps' in rules and rules['sitemaps']:
-                for sitemap_url in rules['sitemaps']:
-                    try:
-                        sitemap_content = self.get_page_content(sitemap_url)
-                        if sitemap_content:
-                            urls = self.parse_sitemap_xml(sitemap_content)
-                            # 유효한 URL만 추가 (is_valid_url 검사 통과)
-                            valid_urls = [url for url in urls if self.is_valid_url(url)]
-                            sitemap_urls.extend(valid_urls)
-                            logger.info(f"사이트맵 {sitemap_url}에서 {len(valid_urls)}개 URL 추출 (총 {len(urls)}개 중)")
-                    except Exception as e:
-                        logger.warning(f"사이트맵 처리 중 오류 발생: {sitemap_url}, {e}")
-        
-        # 일반적인 사이트맵 위치 확인
-        if not sitemap_urls:
-            sitemap_locations = [
-                'sitemap.xml',
-                'sitemap_index.xml',
-                'sitemap/sitemap.xml',
-                'sitemaps/sitemap.xml',
-                'wp-sitemap.xml'  # WordPress 기본 사이트맵
-            ]
-            
-            for loc in sitemap_locations:
-                try:
-                    sitemap_url = urljoin(self.start_url, loc)
-                    sitemap_content = self.get_page_content(sitemap_url)
-                    
-                    if sitemap_content:
-                        urls = self.parse_sitemap_xml(sitemap_content)
-                        # 유효한 URL만 추가 (is_valid_url 검사 통과)
-                        valid_urls = [url for url in urls if self.is_valid_url(url)]
-                        sitemap_urls.extend(valid_urls)
-                        logger.info(f"사이트맵 {sitemap_url}에서 {len(valid_urls)}개 URL 추출 (총 {len(urls)}개 중)")
-                except Exception as e:
-                    logger.debug(f"사이트맵 위치 확인 중: {sitemap_url} - 실패: {e}")
-    
-        # 중복 제거
-        unique_urls = []
-        for url in sitemap_urls:
-            if url not in unique_urls:
-                unique_urls.append(url)
-    
-        # 사이트맵 URL 저장
-        self.sitemap_urls = unique_urls
-        logger.info(f"총 {len(unique_urls)}개의 유효한 URL을 사이트맵에서 추출")
-        
-        return unique_urls
-        
+            logger.error(f"chunked_save()에서 예외 발생: {e}")
+            logger.error(f"청크 디렉토리: {self.output_dir}, 데이터 길이: {len(self.content_data)}")
+
     def crawl(self, max_pages=None, max_workers=5, save_interval=100):
         """웹사이트 크롤링 시작 (대규모 사이트 처리 개선)"""
         # max_pages가 None이면 인스턴스 변수 사용
         if max_pages is None:
             max_pages = self.max_pages
         
-        # 사이트맵 사용 여부
-        use_sitemap = self.use_sitemap
-        
-        if use_sitemap:
-            # 사이트맵 확인
-            logger.info("사이트맵 확인 중...")
-            sitemap_urls = self.check_sitemaps()
-            
-            # 크롤링 대기열 초기화
-            if sitemap_urls:
-                # 사이트맵 URL을 우선 대기열에 추가하고, 시작 URL도 추가
-                queue = list(set(sitemap_urls) - self.visited_urls)
-                if self.start_url not in self.visited_urls:
-                    queue.append(self.start_url)
-            else:
-                # 사이트맵이 없으면 기본 시작 URL 사용
-                queue = [self.start_url] if not self.resume or self.start_url not in self.visited_urls else []
-        else:
-            # 사이트맵을 사용하지 않고 시작 URL부터 링크를 따라가는 방식
-            logger.info("사이트맵을 사용하지 않고 링크 기반 크롤링을 시작합니다.")
-            queue = [self.start_url] if not self.resume or self.start_url not in self.visited_urls else []
-            
-        # 이미 크롤링된 페이지 수
-        page_count = len(self.content_data)
+        queue = [self.start_url]
+        visited = set()
+        page_count = 0
         logger.info(f"크롤링 시작: 목표 {max_pages}페이지, 이미 {page_count}페이지 완료")
         logger.info(f"대기열 초기 크기: {len(queue)}")
         
@@ -612,59 +414,40 @@ class WebsiteCrawler:
         progress_report_interval = max(100, max_pages // 10)
         last_report_count = page_count
         
-        while queue and page_count < max_pages:
-            # 중간 저장 (일정 간격으로)
-            current_time = time.time()
-            if current_time - last_save_time > 60:  # 1분마다 저장
-                self.save_content()
-                self._save_state()
-                last_save_time = current_time
-                
-                # 진행률 보고
-                elapsed_time = (current_time - start_time) / 60
-                if page_count - last_report_count >= progress_report_interval:
-                    progress_percent = min(100, (page_count / max_pages) * 100)
-                    logger.info(f"진행률: {progress_percent:.1f}% ({page_count}/{max_pages} 페이지)")
-                    logger.info(f"경과 시간: {elapsed_time:.1f}분, 속도: {page_count/max(1, elapsed_time):.1f} 페이지/분")
-                    last_report_count = page_count
-            
-            # 남은 페이지 수 계산 및 로그
-            remaining = max_pages - page_count
-            logger.debug(f"남은 페이지: {remaining}, 대기 중인 URL: {len(queue)}")
-            
-            # 여러 URL을 병렬로 처리
+        while queue and (max_pages is None or page_count < max_pages):
             batch_size = min(max_workers, len(queue), max_pages - page_count)
-            current_batch = queue[:batch_size]
-            queue = queue[batch_size:]
-            
+            if batch_size == 0:
+                break
+            current_batch = []
+            while queue and len(current_batch) < batch_size:
+                url = queue.pop(0)
+                if url in visited:
+                    continue
+                if not self.is_valid_url(url):
+                    continue
+                if self.should_exclude_url(url):
+                    logger.info(f"제외 패턴에 의해 제외됨: {url}")
+                    continue
+                visited.add(url)
+                current_batch.append(url)
+            if not current_batch:
+                continue
             # 결과 저장할 임시 딕셔너리
             new_results = {}
             new_links = []
-            
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 def process_url(url):
                     if url in self.visited_urls and not self.resume:
                         return None, []
-                    
                     logger.info(f"크롤링: {url}")
                     self.visited_urls.add(url)
-                    
                     html_content = self.get_page_content(url)
                     if not html_content:
                         return None, []
-                    
-                    # 내용 추출
                     page_data = self.extract_content(url, html_content)
-                    
-                    # 링크 추출
                     links = self.extract_links(url, html_content)
-                    
-                    # 서버 부하 방지를 위한 딜레이
                     time.sleep(self.rate_limit_delay)
-                    
                     return page_data, links
-                
-                # 병렬 실행
                 futures = {executor.submit(process_url, url): url for url in current_batch}
                 for future in futures:
                     url = futures[future]
@@ -680,16 +463,24 @@ class WebsiteCrawler:
                             'error': str(e),
                             'timestamp': time.strftime('%Y-%m-%d %H:%M:%S')
                         }
-            
-            # 새 결과 및 링크 업데이트
             self.content_data.update(new_results)
-            
-            # 새 링크 추가 (이미 방문한 URL 제외)
             for link in new_links:
-                if link not in self.visited_urls and link not in queue:
+                if self.is_valid_url(link) and link not in visited and not self.should_exclude_url(link):
                     queue.append(link)
-            
-            # 일정 간격으로 중간 저장
+            # 중간 저장 및 진행률 보고 등 기존 로직 유지
+            current_time = time.time()
+            if current_time - last_save_time > 60:
+                self.save_content()
+                self._save_state()
+                last_save_time = current_time
+                elapsed_time = (current_time - start_time) / 60
+                if page_count - last_report_count >= progress_report_interval:
+                    progress_percent = min(100, (page_count / max_pages) * 100)
+                    logger.info(f"진행률: {progress_percent:.1f}% ({page_count}/{max_pages} 페이지)")
+                    logger.info(f"경과 시간: {elapsed_time:.1f}분, 속도: {page_count/max(1, elapsed_time):.1f} 페이지/분")
+                    last_report_count = page_count
+            remaining = max_pages - page_count
+            logger.debug(f"남은 페이지: {remaining}, 대기 중인 URL: {len(queue)}")
             if page_count % save_interval == 0:
                 self.save_content()
                 self._save_state()
@@ -698,6 +489,14 @@ class WebsiteCrawler:
         self.save_content()
         self.chunked_save()
         self._save_state()
+        
+        # 크로마DB 저장 시도 (디버깅 로그 추가)
+        try:
+            logger.info(f"ChromaDB 저장 시도: {self.site_name}, 데이터 길이: {len(self.content_data)}")
+            save_to_chromadb(self.content_data, site_name=self.site_name)
+            logger.info(f"ChromaDB 저장 성공: {self.site_name} ({len(self.content_data)}개)")
+        except Exception as e:
+            logger.error(f"ChromaDB 저장 실패: {e}")
         
         # 크롤링 통계
         end_time = time.time()
@@ -768,12 +567,15 @@ class WebsiteCrawler:
         return True
 
     def save_content(self):
-        """크롤링한 내용 저장"""
-        # JSON으로만 저장
-        with open(os.path.join(self.output_dir, 'crawled_data.json'), 'w', encoding='utf-8') as f:
-            json.dump(self.content_data, f, ensure_ascii=False, indent=2)
-        
-        logger.info(f"크롤링 데이터 저장 완료: {len(self.content_data)} 페이지가 {self.output_dir}에 저장되었습니다.")
+        """크롤링한 내용 저장 (디버깅 로그 추가)"""
+        try:
+            save_path = os.path.join(self.output_dir, 'crawled_data.json')
+            with open(save_path, 'w', encoding='utf-8') as f:
+                json.dump(self.content_data, f, ensure_ascii=False, indent=2)
+            logger.info(f"크롤링 데이터 저장 완료: {len(self.content_data)} 페이지가 {save_path}에 저장되었습니다.")
+        except Exception as e:
+            logger.error(f"save_content()에서 예외 발생: {e}")
+            logger.error(f"저장 경로: {self.output_dir}, 데이터 길이: {len(self.content_data)}")
 
 
 # 설정 관리 클래스
@@ -823,7 +625,7 @@ class DocsManager:
                 print(f"- {name}: {url} (데이터 없음)")
     
     def add_site(self, name, url, max_pages=5000, resume=False, exclusion_patterns=None, 
-                 rate_limit_delay=0.5, chunk_size=1000, max_workers=5, use_sitemap=False):
+                 rate_limit_delay=0.5, chunk_size=1000, max_workers=5):
         """새 사이트 추가 및 크롤링"""
         # 이름 검증
         if name in self.config["SITES"] and not resume:
@@ -835,7 +637,7 @@ class DocsManager:
         
         # 크롤링 실행
         try:
-            crawler = WebsiteCrawler(url, output_dir=site_dir, site_name=name, max_pages=max_pages, resume=resume, use_sitemap=use_sitemap)
+            crawler = WebsiteCrawler(url, output_dir=site_dir, site_name=name, max_pages=max_pages, resume=resume)
             
             # 크롤링 설정 적용
             crawler.rate_limit_delay = rate_limit_delay
@@ -884,7 +686,7 @@ class DocsManager:
         return True
     
     def update_site(self, name, max_pages=5000, resume=False, exclusion_patterns=None, 
-                    rate_limit_delay=0.5, chunk_size=1000, max_workers=5, use_sitemap=False):
+                    rate_limit_delay=0.5, chunk_size=1000, max_workers=5):
         """기존 사이트 업데이트"""
         if name not in self.config["SITES"]:
             print(f"'{name}' 사이트가 존재하지 않습니다.")
@@ -907,7 +709,7 @@ class DocsManager:
                 shutil.rmtree(site_dir)
             
             # 새로 크롤링 또는 이어서 크롤링
-            crawler = WebsiteCrawler(url, output_dir=site_dir, site_name=name, max_pages=max_pages, resume=resume, use_sitemap=use_sitemap)
+            crawler = WebsiteCrawler(url, output_dir=site_dir, site_name=name, max_pages=max_pages, resume=resume)
             
             # 크롤링 설정 적용
             crawler.rate_limit_delay = rate_limit_delay
@@ -967,46 +769,44 @@ def main():
     add_parser.add_argument("--max-pages", type=int, default=5000, help="크롤링할 최대 페이지 수")
     add_parser.add_argument("--resume", action="store_true", help="이전 크롤링 작업 이어서 진행")
     add_parser.add_argument("--exclusion", action="append", help="제외할 URL 패턴 (정규식, 여러 번 사용 가능)")
-    add_parser.add_argument("--delay", type=float, default=0.5, help="요청 간 딜레이 (초)")
-    add_parser.add_argument("--chunk-size", type=int, default=1000, help="청크 저장 시 페이지 크기")
-    add_parser.add_argument("--workers", type=int, default=5, help="동시 처리 워커 수")
-    add_parser.add_argument("--use-sitemap", action="store_true", help="사이트맵 사용 여부 (기본값: 사용 안 함)")
+    add_parser.add.argument("--delay", type=float, default=0.5, help="요청 간 딜레이 (초)")
+    add_parser.add.argument("--chunk-size", type=int, default=1000, help="청크 저장 시 페이지 크기")
+    add_parser.add.argument("--workers", type=int, default=5, help="동시 처리 워커 수")
     
     # 사이트 제거
     remove_parser = subparsers.add_parser("remove-site", help="사이트 제거")
-    remove_parser.add_argument("name", help="제거할 사이트 이름")
+    remove_parser.add.argument("name", help="제거할 사이트 이름")
     
     # 사이트 업데이트
     update_parser = subparsers.add_parser("update-site", help="기존 사이트 업데이트")
-    update_parser.add_argument("name", help="업데이트할 사이트 이름")
-    update_parser.add_argument("--max-pages", type=int, default=5000, help="크롤링할 최대 페이지 수")
-    update_parser.add_argument("--resume", action="store_true", help="이전 크롤링 작업 이어서 진행")
-    update_parser.add_argument("--exclusion", action="append", help="제외할 URL 패턴 (정규식, 여러 번 사용 가능)")
-    update_parser.add_argument("--delay", type=float, default=0.5, help="요청 간 딜레이 (초)")
-    update_parser.add_argument("--chunk-size", type=int, default=1000, help="청크 저장 시 페이지 크기")
-    update_parser.add_argument("--workers", type=int, default=5, help="동시 처리 워커 수")
-    update_parser.add_argument("--use-sitemap", action="store_true", help="사이트맵 사용 여부 (기본값: 사용 안 함)")
+    update_parser.add.argument("name", help="업데이트할 사이트 이름")
+    update_parser.add.argument("--max-pages", type=int, default=5000, help="크롤링할 최대 페이지 수")
+    update_parser.add.argument("--resume", action="store_true", help="이전 크롤링 작업 이어서 진행")
+    update_parser.add.argument("--exclusion", action="append", help="제외할 URL 패턴 (정규식, 여러 번 사용 가능)")
+    update_parser.add.argument("--delay", type=float, default=0.5, help="요청 간 딜레이 (초)")
+    update_parser.add.argument("--chunk-size", type=int, default=1000, help="청크 저장 시 페이지 크기")
+    update_parser.add.argument("--workers", type=int, default=5, help="동시 처리 워커 수")
     
     # 사이트 열기
     open_parser = subparsers.add_parser("open", help="사이트의 마크다운 문서 디렉토리 열기")
-    open_parser.add_argument("name", help="열 사이트 이름")
+    open_parser.add.argument("name", help="열 사이트 이름")
     
     # 현재 프로젝트에 링크 생성 기능 추가
     link_parser = subparsers.add_parser("link", help="현재 프로젝트 폴더에 사이트 문서 링크 생성")
-    link_parser.add_argument("name", help="링크할 사이트 이름")
-    link_parser.add_argument("--project-dir", help="프로젝트 디렉토리 (기본값: 현재 디렉토리)")
-    link_parser.add_argument("--docs-folder", default="docs", help="프로젝트 내 문서 폴더 이름 (기본값: docs)")
+    link_parser.add.argument("name", help="링크할 사이트 이름")
+    link_parser.add.argument("--project-dir", help="프로젝트 디렉토리 (기본값: 현재 디렉토리)")
+    link_parser.add.argument("--docs-folder", default="docs", help="프로젝트 내 문서 폴더 이름 (기본값: docs)")
     
     # 모든 사이트를 현재 프로젝트에 링크
     link_all_parser = subparsers.add_parser("link-all", help="모든 사이트를 현재 프로젝트에 링크")
-    link_all_parser.add_argument("--project-dir", help="프로젝트 디렉토리 (기본값: 현재 디렉토리)")
-    link_all_parser.add_argument("--docs-folder", default="docs", help="프로젝트 내 문서 폴더 이름 (기본값: docs)")
+    link_all_parser.add.argument("--project-dir", help="프로젝트 디렉토리 (기본값: 현재 디렉토리)")
+    link_all_parser.add.argument("--docs-folder", default="docs", help="프로젝트 내 문서 폴더 이름 (기본값: docs)")
     
     # 대규모 크롤링용 명령 추가
     bulk_parser = subparsers.add_parser("bulk-crawl", help="CSV나 JSON 파일에서 여러 사이트 크롤링")
-    bulk_parser.add_argument("file", help="사이트 목록이 있는 CSV 또는 JSON 파일 경로")
-    bulk_parser.add_argument("--max-pages", type=int, default=200, help="사이트당 크롤링할 최대 페이지 수")
-    bulk_parser.add_argument("--format", choices=["csv", "json"], default="csv", help="입력 파일 형식")
+    bulk_parser.add.argument("file", help="사이트 목록이 있는 CSV 또는 JSON 파일 경로")
+    bulk_parser.add.argument("--max-pages", type=int, default=200, help="사이트당 크롤링할 최대 페이지 수")
+    bulk_parser.add.argument("--format", choices=["csv", "json"], default="csv", help="입력 파일 형식")
     
     args = parser.parse_args()
     
@@ -1040,8 +840,7 @@ def main():
             exclusion_patterns=exclusion_patterns,
             rate_limit_delay=args.delay,
             chunk_size=args.chunk_size,
-            max_workers=args.workers,
-            use_sitemap=args.use_sitemap
+            max_workers=args.workers
         )
     elif args.command == "remove-site":
         manager.remove_site(args.name)
@@ -1068,8 +867,7 @@ def main():
             exclusion_patterns=exclusion_patterns,
             rate_limit_delay=args.delay,
             chunk_size=args.chunk_size,
-            max_workers=args.workers,
-            use_sitemap=args.use_sitemap
+            max_workers=args.workers
         )
     elif args.command == "open":
         markdown_dir = manager.get_markdown_dir(args.name)
@@ -1232,8 +1030,8 @@ def bulk_crawl(manager, file_path, max_pages=200, format="csv"):
                 progress = json.load(f)
                 completed = set(progress.get('completed', []))
             print(f"이미 {len(completed)}개 사이트 크롤링이 완료되었습니다.")
-        except:
-            pass
+        except Exception as e:
+            print(f"진행 현황 파일 읽기 오류: {e}")
     
     # 각 사이트 크롤링
     success_count = 0

@@ -11,9 +11,13 @@ RUN apt-get update && apt-get install -y curl --no-install-recommends && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
+# 가상환경 생성 및 활성화
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
 # 필요한 파이썬 패키지 설치
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
 
 # 소스 코드 복사
 COPY mcp_server.py .
