@@ -16,15 +16,26 @@ import logging
 from reference_utils import save_to_chromadb
 
 # 로깅 설정
+# logs 디렉토리 생성
+logs_dir = 'logs'
+if not os.path.exists(logs_dir):
+    os.makedirs(logs_dir)
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("crawler.log"),
+        logging.FileHandler(os.path.join(logs_dir, "crawler.log"), mode='a', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger("WebsiteCrawler")
+
+# 로그가 정상적으로 기록되는지 확인
+try:
+    logger.info("=== 웹사이트 크롤러 로깅 시작 ===")
+except Exception as e:
+    print(f"로깅 오류: {e}")
 
 # 로컬 저장소 경로 설정
 HOME_DIR = Path.home()
@@ -145,26 +156,41 @@ class WebsiteCrawler:
             logger.warning(f"robots.txt 파싱 중 오류 발생: {e}")
 
     def is_allowed_by_robots(self, url):
-        """robots.txt 규칙에 따라 URL 크롤링 허용 여부 확인"""
-        path = urlparse(url).path
-        
-        # 특정 에이전트 규칙이 없으면 글로벌 규칙 확인
-        for agent in ('*', 'bot', 'crawler'):
-            if agent in self.robots_rules:
-                rules = self.robots_rules[agent]
+        """robots.txt 규칙에 따라 URL 크롤링 허용 여부 확인 (개선된 로직)"""
+        # 빈 규칙이거나 초기화에 실패했다면 기본적으로 허용
+        if not self.robots_rules:
+            return True
+            
+        try:
+            path = urlparse(url).path
+            if not path:
+                path = "/"
                 
-                # 먼저 Allow 규칙 확인
-                for allow_path in rules.get('allow', []):
-                    if path.startswith(allow_path):
-                        return True
-                
-                # 그 다음 Disallow 규칙 확인
-                for disallow_path in rules.get('disallow', []):
-                    if disallow_path and path.startswith(disallow_path):
-                        logger.debug(f"robots.txt 규칙에 의해 URL 제외: {url}")
-                        return False
-        
-        return True
+            logger.debug(f"robots.txt 규칙 검사: {url}, 경로: {path}")
+            
+            # 특정 에이전트 규칙이 없으면 글로벌 규칙 확인
+            for agent in ('*', 'bot', 'crawler'):
+                if agent in self.robots_rules:
+                    rules = self.robots_rules[agent]
+                    
+                    # 먼저 Allow 규칙 확인
+                    for allow_path in rules.get('allow', []):
+                        if path.startswith(allow_path):
+                            logger.debug(f"robots.txt Allow 규칙에 의해 허용: {url}, 규칙: {allow_path}")
+                            return True
+                    
+                    # 그 다음 Disallow 규칙 확인
+                    for disallow_path in rules.get('disallow', []):
+                        if disallow_path and path.startswith(disallow_path):
+                            logger.info(f"robots.txt Disallow 규칙에 의해 URL 제외: {url}, 규칙: {disallow_path}")
+                            return False
+            
+            # 아무 규칙도 해당하지 않으면 허용
+            return True
+        except Exception as e:
+            logger.warning(f"robots.txt 규칙 검사 중 오류: {url} - {e}")
+            # 오류 발생 시 안전하게 허용
+            return True
         
     def add_exclusion_pattern(self, pattern):
         """크롤링에서 제외할 URL 패턴 추가 (정규식)"""
@@ -208,18 +234,60 @@ class WebsiteCrawler:
 
     def is_valid_url(self, url):
         """start_url과 동일한 도메인/스킴/포트의 자기 자신 및 하위 경로만 True 반환 (슬래시 유무 무시)"""
-        start = urlparse(self.start_url)
-        target = urlparse(url)
-        if (start.scheme, start.hostname, start.port or 80) != (target.scheme, target.hostname, target.port or 80):
+        # URL 정규화: 특수 문자 및 인코딩 문제 처리
+        url = url.strip()
+        
+        # 보이지 않는 특수 문자 제거 (Zero-Width Space 등)
+        url = ''.join(c for c in url if c.isprintable())
+        
+        try:
+            start = urlparse(self.start_url)
+            target = urlparse(url)
+            
+            logger.info(f"URL 유효성 검사: {url}, 도메인: {target.hostname}")
+            
+            # 도메인 일치 확인 (www 서브도메인 허용)
+            start_domain = start.hostname.replace('www.', '') if start.hostname.startswith('www.') else start.hostname
+            target_domain = target.hostname.replace('www.', '') if target.hostname.startswith('www.') else target.hostname
+            
+            if start_domain != target_domain:
+                logger.info(f"도메인 불일치: 시작={start_domain}, 대상={target_domain}")
+                return False
+            
+            # 스킴 불일치 확인 (http/https 호환 허용)
+            if start.scheme != target.scheme and not (
+                (start.scheme == 'http' and target.scheme == 'https') or
+                (start.scheme == 'https' and target.scheme == 'http')
+            ):
+                logger.info(f"스킴 불일치: 시작={start.scheme}, 대상={target.scheme}")
+                return False
+            
+            # 포트 불일치 확인
+            if (start.port or (80 if start.scheme == 'http' else 443)) != (target.port or (80 if target.scheme == 'http' else 443)):
+                logger.info(f"포트 불일치: 시작={start.port}, 대상={target.port}")
+                return False
+                
+            # path 비교 시 끝 슬래시 무시
+            start_path = start.path.rstrip('/')
+            target_path = target.path.rstrip('/')
+            
+            # help-center 페이지 내부에서의 탐색 허용
+            # 루트 페이지 또는 상대 경로 페이지 모두 허용
+            if start_path == '' or target_path == '':
+                return True
+                
+            # 자기 자신 또는 하위 경로 모두 허용 (부모 경로도 허용)
+            result = (target_path == start_path or 
+                     target_path.startswith(start_path + '/') or 
+                     start_path.startswith(target_path + '/'))
+                     
+            if not result:
+                logger.info(f"경로 불일치: 시작경로={start_path}, 대상경로={target_path}")
+            
+            return result
+        except Exception as e:
+            logger.error(f"URL 유효성 검사 중 오류 발생: {url} - {e}")
             return False
-        # path 비교 시 끝 슬래시 무시
-        start_path = start.path.rstrip('/')
-        target_path = target.path.rstrip('/')
-        # 루트라면 모두 허용
-        if start_path == '':
-            return target_path.startswith('/')
-        # 자기 자신 또는 하위 경로 모두 허용
-        return target_path == start_path or target_path.startswith(start_path + '/')
     
     def get_page_content(self, url):
         """페이지 내용 가져오기 (재시도 로직 추가)"""
@@ -261,8 +329,9 @@ class WebsiteCrawler:
         return None
     
     def extract_links(self, url, html_content):
-        """페이지에서 링크 추출 (더 효율적인 방법으로 개선)"""
+        """페이지에서 링크 추출 (개선된 로직 및 디버깅)"""
         if not html_content:
+            logger.warning(f"HTML 내용이 비어 있어 링크를 추출할 수 없습니다: {url}")
             return []
             
         soup = BeautifulSoup(html_content, 'html.parser')
@@ -270,25 +339,73 @@ class WebsiteCrawler:
         
         # 혹시 모를 무한 루프 방지를 위해 최대 링크 수 제한
         max_links_per_page = 500
-        link_count = 0
+        processed_links = set()  # 중복 링크 추적용
+        
+        logger.info(f"페이지의 모든 <a> 태그 추출 시작: {url}")
         
         # 성능 최적화: CSS 선택자로 링크 태그 찾기
-        for a_tag in soup.select('a[href]'):
-            if link_count >= max_links_per_page:
-                logger.warning(f"최대 링크 수 ({max_links_per_page})에 도달하여 링크 추출 중단: {url}")
-                break
+        all_links = soup.select('a[href]')
+        logger.info(f"페이지에서 총 {len(all_links)}개의 <a> 태그를 찾았습니다: {url}")
+        
+        for a_tag in all_links:
+            href = a_tag.get('href', '').strip()
+            
+            # href가 비어있거나 javascript: 또는 mailto: 등 제외
+            if not href or href.startswith(('javascript:', 'mailto:', 'tel:')):
+                continue
                 
-            href = a_tag['href']
-            absolute_url = urljoin(url, href)
-            
-            # 프래그먼트(#) 제거
-            absolute_url = absolute_url.split('#')[0]
-            
-            # 중복 URL 제거와 유효성 검사
-            if absolute_url and absolute_url not in links and absolute_url not in self.visited_urls:
-                if self.is_valid_url(absolute_url):
-                    links.append(absolute_url)
-                    link_count += 1
+            logger.debug(f"원시 링크 발견: {href}")
+                
+            try:
+                # URL 정규화
+                absolute_url = urljoin(url, href)
+                
+                # 보이지 않는 특수 문자 제거
+                absolute_url = ''.join(c for c in absolute_url if c.isprintable())
+                
+                # 프래그먼트(#) 제거
+                absolute_url = absolute_url.split('#')[0]
+                
+                # 중복 URL 확인
+                if absolute_url in processed_links:
+                    continue
+                processed_links.add(absolute_url)
+                
+                # URL 유효성 검사
+                if absolute_url:
+                    valid = self.is_valid_url(absolute_url)
+                    allowed = self.is_allowed_by_robots(absolute_url)
+                    excluded = self.should_exclude_url(absolute_url)
+                    already_visited = absolute_url in self.visited_urls
+                    
+                    logger.info(f"링크 분석: {absolute_url} - 유효: {valid}, 로봇 허용: {allowed}, 제외: {excluded}, 방문함: {already_visited}")
+                    
+                    if valid and allowed and not excluded and not already_visited:
+                        links.append(absolute_url)
+                        logger.info(f"유효한 링크 추출: {absolute_url}")
+            except Exception as e:
+                logger.warning(f"링크 처리 중 오류: {href} -> {e}")
+        
+        logger.info(f"총 {len(links)}개의 유효한 링크를 추출했습니다: {url}")
+        
+        # URL에서 쿼리 매개변수 제거 버전으로 추가 link 시도
+        if not links:
+            logger.warning(f"링크를 찾지 못했습니다. 대체 방법 시도: {url}")
+            try:
+                parsed = urlparse(url)
+                base_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+                
+                # 현재 페이지의 경로에서 하위 경로 추측
+                if parsed.path.endswith('/'):
+                    # 디렉토리 구조에서 부모 디렉토리로 이동 시도
+                    parent_path = '/'.join(parsed.path.rstrip('/').split('/')[:-1]) + '/'
+                    parent_url = f"{parsed.scheme}://{parsed.netloc}{parent_path}"
+                    
+                    if parent_url != url and parent_url not in self.visited_urls:
+                        links.append(parent_url)
+                        logger.info(f"대체 링크 추가 (부모 디렉토리): {parent_url}")
+            except Exception as e:
+                logger.warning(f"대체 링크 생성 중 오류: {e}")
         
         return links
     
@@ -490,13 +607,13 @@ class WebsiteCrawler:
         self.chunked_save()
         self._save_state()
         
-        # 크로마DB 저장 시도 (디버깅 로그 추가)
+        # 크롤링 데이터 처리 완료 로그
         try:
-            logger.info(f"ChromaDB 저장 시도: {self.site_name}, 데이터 길이: {len(self.content_data)}")
+            logger.info(f"크롤링 데이터 준비 완료: {self.site_name}, 문서 {len(self.content_data)}개")
             save_to_chromadb(self.content_data, site_name=self.site_name)
-            logger.info(f"ChromaDB 저장 성공: {self.site_name} ({len(self.content_data)}개)")
+            # 실제 ChromaDB 저장은 mcp_server.py에서 수행됨
         except Exception as e:
-            logger.error(f"ChromaDB 저장 실패: {e}")
+            logger.error(f"크롤링 데이터 처리 중 오류: {e}")
         
         # 크롤링 통계
         end_time = time.time()

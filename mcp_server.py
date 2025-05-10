@@ -85,11 +85,16 @@ except ImportError as e:
     logging.info("reference_utils 대체 함수를 생성했습니다.")
 
 # 로깅 설정
+# logs 디렉토리 생성
+logs_dir = 'logs'
+if not os.path.exists(logs_dir):
+    os.makedirs(logs_dir)
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levellevelname)s - %(message)s',
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("logs/mcp_server.log", mode='a'),
+        logging.FileHandler(os.path.join(logs_dir, "mcp_server.log"), mode='a', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
@@ -141,7 +146,6 @@ class CrawlRequest(BaseModel):
     exclusion_patterns: Optional[List[str]] = None
     resume: Optional[bool] = False
     rate_limit_delay: Optional[float] = 0.5
-    use_sitemap: Optional[bool] = True
     max_workers: Optional[int] = 5
 
 class CrawlStatus(BaseModel):
@@ -199,8 +203,7 @@ def embed_texts(texts: List[str]) -> List[List[float]]:
 # 백그라운드 크롤링 작업
 async def background_crawl(url: str, site_name: str, max_pages: int = 50, 
                            exclusion_patterns: List[str] = None, resume: bool = False,
-                           rate_limit_delay: float = 0.5, use_sitemap: bool = True,
-                           max_workers: int = 5):
+                           rate_limit_delay: float = 0.5, max_workers: int = 5):
     """웹사이트 크롤링을 백그라운드에서 실행"""
     from website_crawler import WebsiteCrawler
     
@@ -287,8 +290,12 @@ async def background_crawl(url: str, site_name: str, max_pages: int = 50,
         for doc in processed_docs:
             # 이미 존재하는 문서인지 확인 (사이트 이름과 URL 기준)
             try:
+                # ChromaDB는 where 조건에 하나의 연산자만 허용하므로 $and 연산자 사용
                 existing = collection.get(
-                    where={"site": site_name, "url": doc['metadata'].get('url', '')}
+                    where={"$and": [
+                        {"site": {"$eq": site_name}},
+                        {"url": {"$eq": doc['metadata'].get('url', '')}}
+                    ]}
                 )
                 if existing and len(existing["ids"]) > 0:
                     # 이미 존재하는 문서 삭제
@@ -453,7 +460,6 @@ async def crawl_website(request: CrawlRequest, background_tasks: BackgroundTasks
             exclusion_patterns=exclusion_patterns,
             resume=request.resume,
             rate_limit_delay=request.rate_limit_delay,
-            use_sitemap=request.use_sitemap,
             max_workers=request.max_workers
         )
         
@@ -526,7 +532,7 @@ async def delete_site_documents(site_name: str):
         
         # 사이트 이름으로 문서 검색
         results = collection.get(
-            where={"site": site_name},
+            where={"site": {"$eq": site_name}},
             include=["metadatas", "documents", "embeddings", "ids"]
         )
         
